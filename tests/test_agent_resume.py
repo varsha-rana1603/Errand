@@ -49,25 +49,21 @@ class FakeExecutor:
     def __init__(self):
         self.calls = []
 
-        # Agent checks executor.registry.get(...)
         self.registry = self
 
     def get(self, capability):
         return capability
 
-    def execute(self, plan):
-
-        step = plan.steps[0]
+    def execute(self, capability_name, inputs):
 
         self.calls.append(
             (
-                step.capability,
-                step.inputs,
+                capability_name,
+                inputs,
             )
         )
 
-        return ["Opened Safari."]
-
+        return "Opened Safari."
 
 def test_agent_can_resume_after_user_input():
 

@@ -1,19 +1,7 @@
 from errand.cli.main import run_command
-from errand.core.intent import Intent
-from errand.skills.defaults import create_default_registry
 
 
-class FakeParser:
-
-    def parse(self, command):
-
-        return Intent(
-            action="open_app",
-            fields={},
-        )
-
-
-def test_cli_can_handle_agent_question(monkeypatch, capsys):
+def test_cli_can_handle_agent_question(capsys):
 
     class FakeModel:
 
@@ -33,6 +21,7 @@ def test_cli_can_handle_agent_question(monkeypatch, capsys):
     output = capsys.readouterr().out
 
     assert "Which application would you like me to open?" in output
+
 
 def test_cli_uses_agent_flow(monkeypatch, capsys):
 
@@ -68,4 +57,3 @@ def test_cli_uses_agent_flow(monkeypatch, capsys):
     output = capsys.readouterr().out
 
     assert "Task completed." in output
-

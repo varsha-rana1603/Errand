@@ -1,23 +1,28 @@
 from errand.agent.agent import Agent
 from errand.agent.decision import AgentDecision
-from errand.core.executor import Executor
-from errand.core.plan import ExecutionPlan, PlanStep
-from errand.skills.base import Skill
-from errand.skills.registry import SkillRegistry
+from errand.core.capability_executor import CapabilityExecutor
+from errand.capabilities.base import Capability
+from errand.capabilities.registry import CapabilityRegistry
 
 
-class FakeOpenAppSkill(Skill):
+class FakeOpenAppCapability(Capability):
 
     @property
-    def action(self):
+    def name(self):
         return "open_app"
 
     @property
-    def required_fields(self):
-        return {"app_name"}
+    def description(self):
+        return "Open a macOS application."
 
-    def execute(self, intent):
-        return f"Opened {intent.fields['app_name']}"
+    @property
+    def input_schema(self):
+        return {
+            "app_name": str,
+        }
+
+    def execute(self, inputs):
+        return f"Opened {inputs['app_name']}"
 
 
 class FakeModel:
@@ -26,17 +31,16 @@ class FakeModel:
         self.decisions = iter(decisions)
 
     def decide(self, context):
-
         return next(self.decisions)
 
 
 def create_executor():
 
-    registry = SkillRegistry()
+    registry = CapabilityRegistry()
 
-    registry.register(FakeOpenAppSkill())
+    registry.register(FakeOpenAppCapability())
 
-    return Executor(registry)
+    return CapabilityExecutor(registry)
 
 
 def test_agent_executes_capability_then_finishes():
@@ -131,6 +135,7 @@ def test_agent_stops_after_max_steps():
     result = agent.run("Do something")
 
     assert result.type == "ask_user"
+
 
 def test_agent_rejects_unknown_capability():
 
