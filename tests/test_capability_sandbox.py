@@ -9,12 +9,15 @@ from errand.capabilities.sandbox import (
 )
 
 
-def make_generated(source: str) -> GeneratedCapability:
+def make_generated(
+    source: str,
+    inputs: dict[str, str] | None = None,
+) -> GeneratedCapability:
 
     spec = GeneratedCapabilitySpec(
         name="test_capability",
         description="A test capability.",
-        inputs={},
+        inputs=inputs or {},
     )
 
     return GeneratedCapability(
@@ -109,7 +112,7 @@ class TestCapability(Capability):
     @property
     def input_schema(self):
         return {
-            "message": str,
+            "message": "string",
         }
 
     def execute(self, inputs):
@@ -119,7 +122,12 @@ class TestCapability(Capability):
     sandbox = CapabilitySandbox()
 
     result = sandbox.run(
-        make_generated(source)
+        make_generated(
+            source,
+            inputs={
+                "message": "string",
+            },
+        )
     )
 
     assert result.passed

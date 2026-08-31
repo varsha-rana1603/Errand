@@ -8,7 +8,7 @@ from errand.capabilities.generator import (
     GeneratedCapability,
     GeneratedCapabilitySpec,
 )
-from errand.capabilities.registry import CapabilityRegistry
+from errand.capabilities.registry import (CapabilityRegistry, normalize_input_schema)
 from errand.capabilities.validator import CapabilityValidator
 
 
@@ -217,6 +217,13 @@ class CapabilityApprovalManager:
         """
         Verify that the implementation actually matches the
         generated specification before registration.
+
+        Errand uses canonical string-based input schemas:
+
+            string
+            integer
+            float
+            boolean
         """
 
         if capability.name != spec.name:
@@ -231,24 +238,28 @@ class CapabilityApprovalManager:
                 "the generated specification."
             )
 
-        schema = capability.input_schema
-
-        if not isinstance(schema, dict):
-            raise CapabilityApprovalError(
-                "Capability input_schema must be a dictionary."
+        try:
+            schema = normalize_input_schema(
+                capability.input_schema
             )
+        except Exception as exc:
+            raise CapabilityApprovalError(
+                f"Invalid capability input_schema: {exc}"
+            ) from exc
 
-        expected_types = {
-            "string": str,
-            "integer": int,
-            "float": float,
-            "boolean": bool,
-        }
+        expected_schema = normalize_input_schema(
+            spec.inputs
+        )
 
-        expected_schema = {
-            name: expected_types[input_type]
-            for name, input_type in spec.inputs.items()
-        }
+        print(
+            "[APPROVAL] Capability input_schema:",
+            schema,
+        )
+
+        print(
+            "[APPROVAL] Expected input_schema:",
+            expected_schema,
+        )
 
         if schema != expected_schema:
             raise CapabilityApprovalError(
@@ -260,7 +271,6 @@ class CapabilityApprovalManager:
             raise CapabilityApprovalError(
                 "Capability execute() is not callable."
             )
-
     # ----------------------------------------------------------
     # PERSISTENCE
     # ----------------------------------------------------------

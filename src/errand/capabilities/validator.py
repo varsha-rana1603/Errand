@@ -11,13 +11,8 @@ class CapabilityValidator:
     """
     Statically validates generated capability source code.
 
-    The validator uses a blacklist approach:
-    legitimate Python/macOS imports are allowed by default,
-    while known dangerous imports, calls, and reflective escape
-    mechanisms are rejected.
-
-    Generated code is still considered untrusted and MUST be
-    sandbox-tested before registration or execution.
+    Generated code is untrusted and MUST be sandbox-tested
+    before registration or execution.
     """
 
     FORBIDDEN_CALLS = {
@@ -51,7 +46,7 @@ class CapabilityValidator:
         "importlib",
         "code",
         "pty",
-        "socket"
+        "socket",
     }
 
     FORBIDDEN_ATTRIBUTES = {
@@ -71,10 +66,14 @@ class CapabilityValidator:
         spec: GeneratedCapabilitySpec,
     ) -> None:
 
+        print("[VALIDATOR] Starting static validation...")
+
         if not source.strip():
             raise CapabilityValidationError(
                 "Generated capability code is empty."
             )
+
+        print("[VALIDATOR] Parsing Python AST...")
 
         try:
             tree = ast.parse(source)
@@ -85,10 +84,25 @@ class CapabilityValidator:
                 f"{exc}"
             ) from exc
 
+        print("[VALIDATOR] AST parsing passed.")
+
+        print("[VALIDATOR] Checking imports...")
         self._validate_imports(tree)
+        print("[VALIDATOR] Import validation passed.")
+
+        print("[VALIDATOR] Checking dangerous calls...")
         self._validate_calls(tree)
+        print("[VALIDATOR] Call validation passed.")
+
+        print("[VALIDATOR] Checking dangerous attributes...")
         self._validate_attributes(tree)
+        print("[VALIDATOR] Attribute validation passed.")
+
+        print("[VALIDATOR] Checking capability structure...")
         self._validate_classes(tree, spec)
+        print("[VALIDATOR] Capability structure validation passed.")
+
+        print("[VALIDATOR] ✓ STATIC VALIDATION PASSED")
 
     # ----------------------------------------------------------
     # IMPORT VALIDATION
@@ -193,6 +207,11 @@ class CapabilityValidator:
                     if base.attr == "Capability":
                         capability_classes.append(node)
 
+        print(
+            "[VALIDATOR] Capability subclasses found:",
+            len(capability_classes),
+        )
+
         if len(capability_classes) != 1:
             raise CapabilityValidationError(
                 "Generated code must contain exactly one "
@@ -200,6 +219,15 @@ class CapabilityValidator:
             )
 
         capability_class = capability_classes[0]
+
+        print(
+            "[VALIDATOR] Capability class:",
+            capability_class.name,
+        )
+
+        # ------------------------------------------------------
+        # REQUIRED METHODS
+        # ------------------------------------------------------
 
         methods = {
             node.name
@@ -210,10 +238,16 @@ class CapabilityValidator:
             )
         }
 
+        print(
+            "[VALIDATOR] Methods found:",
+            sorted(methods),
+        )
+
         required_methods = {
             "execute",
             "name",
             "description",
+            "input_schema",
         }
 
         missing = required_methods - methods
@@ -224,9 +258,46 @@ class CapabilityValidator:
                 f"{sorted(missing)}"
             )
 
+        # ------------------------------------------------------
+        # PROPERTY VALIDATION
+        # ------------------------------------------------------
+
+        for property_name in (
+            "name",
+            "description",
+            "input_schema",
+        ):
+
+            print(
+                f"[VALIDATOR] Checking @{property_name} property..."
+            )
+
+            if not self._is_property(
+                capability_class,
+                property_name,
+            ):
+                raise CapabilityValidationError(
+                    f"Capability member '{property_name}' "
+                    "must be implemented as an @property."
+                )
+
+        # ------------------------------------------------------
+        # NAME VALIDATION
+        # ------------------------------------------------------
+
         name_value = self._find_property_return(
             capability_class,
             "name",
+        )
+
+        print(
+            "[VALIDATOR] Generated name:",
+            repr(name_value),
+        )
+
+        print(
+            "[VALIDATOR] Expected name:",
+            repr(spec.name),
         )
 
         if name_value != spec.name:
@@ -234,6 +305,88 @@ class CapabilityValidator:
                 f"Capability name '{name_value}' does not match "
                 f"requested name '{spec.name}'."
             )
+
+        # ------------------------------------------------------
+        # DESCRIPTION VALIDATION
+        # ------------------------------------------------------
+
+        description_value = self._find_property_return(
+            capability_class,
+            "description",
+        )
+
+        if description_value != spec.description:
+            raise CapabilityValidationError(
+                "Capability description does not match "
+                "the generated specification."
+            )
+
+        # ------------------------------------------------------
+        # INPUT SCHEMA VALIDATION
+        # ------------------------------------------------------
+
+        input_schema = self._find_dict_property_return(
+            capability_class,
+            "input_schema",
+        )
+
+        print(
+            "[VALIDATOR] Generated input_schema:",
+            repr(input_schema),
+        )
+
+        print(
+            "[VALIDATOR] Expected input_schema:",
+            repr(spec.inputs),
+        )
+
+        if input_schema != spec.inputs:
+            print("IINPUT_SCHEMA:", input_schema, spec.inputs)
+            raise CapabilityValidationError(
+                "Capability input_schema does not match "
+                "the generated specification."
+            )
+
+    # ----------------------------------------------------------
+    # PROPERTY DETECTION
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _is_property(
+        class_node: ast.ClassDef,
+        property_name: str,
+    ) -> bool:
+
+        for node in class_node.body:
+
+            if not isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                continue
+
+            if node.name != property_name:
+                continue
+
+            for decorator in node.decorator_list:
+
+                if (
+                    isinstance(decorator, ast.Name)
+                    and decorator.id == "property"
+                ):
+                    return True
+
+                if (
+                    isinstance(decorator, ast.Attribute)
+                    and decorator.attr == "property"
+                ):
+                    return True
+
+        return False
+
+    # ----------------------------------------------------------
+    # STRING PROPERTY RETURN
+    # ----------------------------------------------------------
 
     @staticmethod
     def _find_property_return(
@@ -243,26 +396,20 @@ class CapabilityValidator:
 
         for node in class_node.body:
 
-            if not isinstance(node, ast.FunctionDef):
+            if not isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
                 continue
 
             if node.name != property_name:
                 continue
 
-            is_property = any(
-                (
-                    isinstance(decorator, ast.Name)
-                    and decorator.id == "property"
-                )
-                or (
-                    isinstance(decorator, ast.Attribute)
-                    and decorator.attr == "property"
-                )
-                for decorator in node.decorator_list
-            )
-
-            if not is_property:
-                continue
+            if not CapabilityValidator._is_property(
+                class_node,
+                property_name,
+            ):
+                return None
 
             for child in ast.walk(node):
 
@@ -278,5 +425,77 @@ class CapabilityValidator:
                             str,
                         ):
                             return child.value.value
+
+        return None
+
+    # ----------------------------------------------------------
+    # DICT PROPERTY RETURN
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _find_dict_property_return(
+        class_node: ast.ClassDef,
+        property_name: str,
+    ) -> dict | None:
+
+        for node in class_node.body:
+
+            if not isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                continue
+
+            if node.name != property_name:
+                continue
+
+            if not CapabilityValidator._is_property(
+                class_node,
+                property_name,
+            ):
+                return None
+
+            for child in ast.walk(node):
+
+                if not isinstance(child, ast.Return):
+                    continue
+
+                if not isinstance(child.value, ast.Dict):
+                    continue
+
+                result = {}
+
+                for key, value in zip(
+                    child.value.keys,
+                    child.value.values,
+                ):
+
+                    if not isinstance(
+                        key,
+                        ast.Constant,
+                    ):
+                        return None
+
+                    if not isinstance(
+                        key.value,
+                        str,
+                    ):
+                        return None
+
+                    if not isinstance(
+                        value,
+                        ast.Constant,
+                    ):
+                        return None
+
+                    if not isinstance(
+                        value.value,
+                        str,
+                    ):
+                        return None
+
+                    result[key.value] = value.value
+
+                return result
 
         return None

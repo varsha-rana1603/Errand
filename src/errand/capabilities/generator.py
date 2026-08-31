@@ -1,18 +1,103 @@
 import json
 from dataclasses import dataclass
+import os
 
-from google import genai
+from openai import OpenAI
+
+
+# ============================================================
+# INPUT SCHEMA NORMALIZATION
+# ============================================================
+
+INPUT_TYPE_ALIASES = {
+    "string": "string",
+    str: "string",
+
+    "integer": "integer",
+    int: "integer",
+
+    "float": "float",
+    float: "float",
+
+    "boolean": "boolean",
+    bool: "boolean",
+}
+
+
+def normalize_input_schema(
+    inputs: dict,
+) -> dict[str, str]:
+    """
+    Convert all supported input type representations into
+    Errand's canonical string representation.
+
+    Examples:
+
+        {"url": "string"}
+            -> {"url": "string"}
+
+        {"url": str}
+            -> {"url": "string"}
+
+        {"count": int}
+            -> {"count": "integer"}
+
+        {"enabled": bool}
+            -> {"enabled": "boolean"}
+    """
+
+    if not isinstance(inputs, dict):
+        raise ValueError(
+            "Capability input_schema must be a dictionary."
+        )
+
+    normalized = {}
+
+    for input_name, input_type in inputs.items():
+
+        if not isinstance(input_name, str):
+            raise ValueError(
+                "Capability input names must be strings."
+            )
+
+        if input_type not in INPUT_TYPE_ALIASES:
+            raise ValueError(
+                f"Unsupported input type {input_type!r} "
+                f"for input '{input_name}'."
+            )
+
+        normalized[input_name] = INPUT_TYPE_ALIASES[input_type]
+
+    return normalized
 
 
 @dataclass(frozen=True)
 class GeneratedCapabilitySpec:
     """
     Specification for a capability that Errand wants to create.
+
+    Input types are ALWAYS normalized into canonical strings:
+
+        string
+        integer
+        float
+        boolean
     """
 
     name: str
     description: str
     inputs: dict[str, str]
+
+    def __post_init__(self):
+        normalized_inputs = normalize_input_schema(
+            self.inputs
+        )
+
+        object.__setattr__(
+            self,
+            "inputs",
+            normalized_inputs,
+        )
 
 
 @dataclass(frozen=True)
@@ -30,18 +115,45 @@ class GeneratedCapability:
 
 class CapabilityGenerator:
     """
-    Uses Gemini to design and generate a new Errand capability.
+    Uses NVIDIA NIM to design and generate Errand capabilities.
 
-    Generated source is treated as untrusted code.
-    This class does NOT execute, register, or persist it.
+    NVIDIA NIM exposes an OpenAI-compatible API, so we use the
+    OpenAI Python client with NVIDIA's base URL.
+
+    This class does NOT:
+    - execute generated code
+    - register capabilities
+    - persist capabilities
     """
 
     def __init__(
         self,
-        model: str = "gemini-3.6-flash",
+        model: str = "openai/gpt-oss-20b",
     ):
         self.model = model
-        self.client = genai.Client()
+
+        print(
+            f"[GENERATOR] Initializing NVIDIA NIM client "
+            f"with model='{self.model}'"
+        )
+
+        api_key = os.environ.get("NVIDIA_API_KEY")
+
+        if not api_key:
+            raise ValueError(
+                "NVIDIA_API_KEY environment variable is not set."
+            )
+
+        self.client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=api_key,
+        )
+
+        print("[GENERATOR] NVIDIA NIM client initialized")
+
+    # ============================================================
+    # SPECIFICATION GENERATION
+    # ============================================================
 
     def generate(
         self,
@@ -49,28 +161,148 @@ class CapabilityGenerator:
         description: str,
     ) -> GeneratedCapabilitySpec:
 
+        print()
+        print("=" * 70)
+        print("[GENERATOR] STEP 1: GENERATING CAPABILITY SPECIFICATION")
+        print("=" * 70)
+
+        print(f"[GENERATOR] Requested name: {name!r}")
+        print(
+            f"[GENERATOR] Requested description: "
+            f"{description!r}"
+        )
+
         prompt = self._build_spec_prompt(
             name=name,
             description=description,
         )
 
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
+        print("[GENERATOR] Sending specification prompt to NVIDIA...")
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                temperature=0,
+                max_tokens=2000,
+                reasoning_effort="low",
+            )
+
+        except Exception as exc:
+            print(
+                "[GENERATOR] NVIDIA specification request FAILED"
+            )
+            print(
+                f"[GENERATOR] Exception: {type(exc).__name__}: {exc}"
+            )
+            raise
+
+        print(
+            "[GENERATOR] NVIDIA specification response received"
         )
 
-        return self._parse_spec(response.text)
+        message = response.choices[0].message
+
+        print(
+            f"[GENERATOR] Finish reason: "
+            f"{response.choices[0].finish_reason}"
+        )
+
+        print(
+            f"[GENERATOR] Raw specification response:\n"
+            f"{message.content}"
+        )
+
+        if not message.content:
+            raise ValueError(
+                "NVIDIA returned an empty capability specification."
+            )
+
+        print("[GENERATOR] Parsing capability specification...")
+
+        spec = self._parse_spec(message.content)
+
+        print("[GENERATOR] Parsed specification:")
+        print(f"    name        = {spec.name!r}")
+        print(
+            f"    description = {spec.description!r}"
+        )
+        print(
+            f"    inputs      = {spec.inputs!r}"
+        )
+        print(
+            f"    input types = "
+            f"{[(k, type(v).__name__) for k, v in spec.inputs.items()]}"
+        )
+
+        print(
+            "[GENERATOR] Specification generation SUCCESS"
+        )
+
+        return spec
+
+    # ============================================================
+    # CODE GENERATION
+    # ============================================================
 
     def generate_code(
         self,
         spec: GeneratedCapabilitySpec,
     ) -> GeneratedCapability:
 
+        print()
+        print("=" * 70)
+        print("[GENERATOR] STEP 2: GENERATING CAPABILITY CODE")
+        print("=" * 70)
+
+        print("[GENERATOR] Specification received:")
+        print(f"    name        = {spec.name!r}")
+        print(
+            f"    description = {spec.description!r}"
+        )
+        print(
+            f"    inputs      = {spec.inputs!r}"
+        )
+        print(
+            f"    input types = "
+            f"{[(k, type(v).__name__) for k, v in spec.inputs.items()]}"
+        )
+
+        # --------------------------------------------------------
+        # NORMALIZE INPUT SCHEMA BEFORE SENDING TO LLM
+        # --------------------------------------------------------
+
+        normalized_inputs = normalize_input_schema(
+            spec.inputs
+        )
+
+        print(
+            "[GENERATOR] Normalized input schema:"
+        )
+        print(
+            f"    {normalized_inputs!r}"
+        )
+
+        inputs_json = json.dumps(
+            normalized_inputs,
+            indent=2,
+        )
+
+        print(
+            "[GENERATOR] JSON representation of inputs:"
+        )
+        print(inputs_json)
+
         prompt = f"""
 You are generating Python source code for a capability
 inside Errand, a macOS AI assistant.
 
-The capability specification was already created.
+The capability specification below is AUTHORITATIVE.
 
 NAME:
 {spec.name}
@@ -79,23 +311,126 @@ DESCRIPTION:
 {spec.description}
 
 INPUTS:
-{json.dumps(spec.inputs, indent=2)}
+{inputs_json}
 
-Generate ONE complete Python source file implementing this
-capability.
+Generate ONE complete Python source file.
 
-The implementation must:
+REQUIRED STRUCTURE:
 
-- import Capability from errand.capabilities.base
-- define exactly one Capability subclass
-- implement name
-- implement description
-- implement input_schema
-- implement execute
-- use the specified input names
-- return a useful result from execute
+1. Import:
 
-IMPORTANT SECURITY RULES:
+from errand.capabilities.base import Capability
+
+2. Define exactly ONE subclass of Capability.
+
+3. Implement these four members:
+
+- name
+- description
+- input_schema
+- execute(self, inputs)
+
+CRITICAL CLASS INTERFACE:
+
+`name` MUST be an @property.
+
+`description` MUST be an @property.
+
+`input_schema` MUST be an @property.
+
+The class MUST follow this exact structure:
+
+class ExampleCapability(Capability):
+
+    @property
+    def name(self) -> str:
+        return "example"
+
+    @property
+    def description(self) -> str:
+        return "Example capability."
+
+    @property
+    def input_schema(self) -> dict[str, str]:
+        return {{
+            "value": "string"
+        }}
+
+    def execute(self, inputs: dict):
+        value = inputs["value"]
+        ...
+
+CRITICAL INPUT_SCHEMA RULE:
+
+The input_schema property MUST return exactly:
+
+{inputs_json}
+
+The values MUST be STRING VALUES.
+
+For example:
+
+{{
+    "url": "string"
+}}
+
+MUST generate:
+
+@property
+def input_schema(self):
+    return {{
+        "url": "string"
+    }}
+
+DO NOT generate:
+
+@property
+def input_schema(self):
+    return {{
+        "url": str
+    }}
+
+DO NOT use Python type objects such as:
+
+- str
+- int
+- float
+- bool
+
+The canonical Errand input type strings are:
+
+- "string"
+- "integer"
+- "float"
+- "boolean"
+
+They MUST remain strings inside input_schema.
+
+EXECUTE METHOD:
+
+The method MUST have exactly this form:
+
+def execute(self, inputs):
+
+`inputs` is ALWAYS a dictionary.
+
+You MUST extract values from it using the exact input names.
+
+For example:
+
+def execute(self, inputs):
+    url = inputs["url"]
+
+Then operate on `url`.
+
+NEVER treat `inputs` itself as the input value.
+
+Do not rename input keys.
+Do not add input keys.
+Do not remove input keys.
+Do not change input types.
+
+SECURITY RULES:
 
 - Do not use eval().
 - Do not use exec().
@@ -105,41 +440,125 @@ IMPORTANT SECURITY RULES:
 - Do not use pickle.
 - Do not use marshal.
 - Do not use importlib.
-- Do not access __globals__, __builtins__, __code__,
-  __subclasses__, __bases__, or __mro__.
-- Do not download or execute remote code.
-- Do not include secrets, credentials, API keys, or tokens.
-- Do not modify Errand's source code.
+- Do not access __globals__.
+- Do not access __builtins__.
+- Do not access __code__.
+- Do not access __subclasses__.
+- Do not access __bases__.
+- Do not access __mro__.
+- Do not download remote code.
+- Do not execute remote code.
+- Do not include secrets.
+- Do not include credentials.
+- Do not include API keys.
+- Do not modify Errand source code.
 - Do not modify the capability registry.
 - Do not install packages.
 - Do not include tests.
-- Do not include Markdown fences.
+
+OUTPUT RULES:
+
 - Return Python source code only.
-
-The generated code will be statically checked and
-executed inside a sandbox before it can become trusted.
-
-The source will be treated as UNTRUSTED and will be
-statically validated and sandbox-tested before it can
-ever be registered or executed.
+- Do not use Markdown fences.
+- Do not explain the code.
+- Define exactly one Capability subclass.
 """
 
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
+        print(
+            "[GENERATOR] Sending code-generation prompt to NVIDIA..."
         )
 
-        source = self._clean_source(response.text)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                temperature=0,
+                max_tokens=5000,
+                reasoning_effort="low",
+            )
+
+        except Exception as exc:
+            print(
+                "[GENERATOR] NVIDIA code-generation request FAILED"
+            )
+            print(
+                f"[GENERATOR] Exception: {type(exc).__name__}: {exc}"
+            )
+            raise
+
+        print(
+            "[GENERATOR] NVIDIA code-generation response received"
+        )
+
+        message = response.choices[0].message
+
+        print(
+            f"[GENERATOR] Finish reason: "
+            f"{response.choices[0].finish_reason}"
+        )
+
+        print()
+        print("[GENERATOR] RAW GENERATED RESPONSE:")
+        print("-" * 70)
+        print(message.content)
+        print("-" * 70)
+
+        if not message.content:
+            raise ValueError(
+                "NVIDIA generated empty capability source."
+            )
+
+        print(
+            "[GENERATOR] Cleaning generated source..."
+        )
+
+        source = self._clean_source(message.content)
+
+        print(
+            f"[GENERATOR] Source length after cleaning: "
+            f"{len(source)}"
+        )
+
+        print()
+        print("[GENERATOR] CLEANED SOURCE:")
+        print("-" * 70)
+        print(source)
+        print("-" * 70)
 
         if not source:
             raise ValueError(
-                "Gemini generated empty capability source."
+                "NVIDIA generated empty capability source."
             )
 
-        return GeneratedCapability(
+        generated = GeneratedCapability(
             spec=spec,
             source=source,
         )
+
+        print(
+            "[GENERATOR] Returning GeneratedCapability"
+        )
+
+        print(
+            "[GENERATOR] Expected specification:"
+        )
+        print(f"    {generated.spec}")
+
+        print(
+            "[GENERATOR] Expected input_schema:"
+        )
+        print(f"    {generated.spec.inputs}")
+
+        return generated
+
+    # ============================================================
+    # FULL GENERATION
+    # ============================================================
 
     def generate_full(
         self,
@@ -154,6 +573,10 @@ ever be registered or executed.
 
         return self.generate_code(spec)
 
+    # ============================================================
+    # SPECIFICATION PROMPT
+    # ============================================================
+
     def _build_spec_prompt(
         self,
         name: str,
@@ -167,57 +590,60 @@ a general-purpose macOS AI assistant.
 The capability does not currently exist.
 
 CAPABILITY NAME:
-
 {name}
 
 REQUESTED BEHAVIOR:
-
 {description}
 
-Create a precise specification for this capability.
+Create a precise specification.
 
-The specification must contain:
+Return exactly one JSON object containing:
 
 - name
 - description
 - inputs
 
-The inputs object must map each required input name
-to a simple Python type name such as:
+The inputs object maps input names to one of:
 
 - string
 - integer
 - float
 - boolean
 
-Return EXACTLY one JSON object:
+Example:
 
 {{
-    "name": "capability_name",
-    "description": "What the capability does",
+    "name": "open_url",
+    "description": "Open a URL in the user's web browser.",
     "inputs": {{
-        "input_name": "string"
+        "url": "string"
     }}
 }}
 
 Rules:
 
-- Do not generate Python code.
+- Return valid JSON only.
+- Do not generate Python.
 - Do not generate shell commands.
 - Do not execute anything.
 - Do not include Markdown.
-- Return valid JSON only.
 """
 
+    # ============================================================
+    # SPECIFICATION PARSER
+    # ============================================================
+
     @staticmethod
-    def _parse_spec(text: str) -> GeneratedCapabilitySpec:
+    def _parse_spec(
+        text: str,
+    ) -> GeneratedCapabilitySpec:
 
         try:
             data = json.loads(text)
 
         except json.JSONDecodeError as exc:
             raise ValueError(
-                "Gemini returned invalid capability specification: "
+                "NVIDIA returned invalid capability specification: "
                 f"{exc}"
             ) from exc
 
@@ -230,7 +656,10 @@ Rules:
                 "Generated capability is missing a valid name."
             )
 
-        if not isinstance(description, str) or not description.strip():
+        if (
+            not isinstance(description, str)
+            or not description.strip()
+        ):
             raise ValueError(
                 "Generated capability is missing a valid description."
             )
@@ -240,34 +669,44 @@ Rules:
                 "Generated capability inputs must be an object."
             )
 
-        allowed_types = {
-            "string",
-            "integer",
-            "float",
-            "boolean",
-        }
+        # --------------------------------------------------------
+        # NORMALIZE INPUT SCHEMA
+        # --------------------------------------------------------
 
-        for input_name, input_type in inputs.items():
+        try:
+            normalized_inputs = normalize_input_schema(
+                inputs
+            )
 
-            if not isinstance(input_name, str):
-                raise ValueError(
-                    "Capability input names must be strings."
-                )
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid capability input schema: {exc}"
+            ) from exc
 
-            if input_type not in allowed_types:
-                raise ValueError(
-                    f"Unsupported input type '{input_type}' "
-                    f"for input '{input_name}'."
-                )
+        print(
+            "[GENERATOR] Input schema normalized:"
+        )
+        print(
+            f"    original  = {inputs!r}"
+        )
+        print(
+            f"    normalized = {normalized_inputs!r}"
+        )
 
         return GeneratedCapabilitySpec(
             name=name.strip(),
             description=description.strip(),
-            inputs=inputs,
+            inputs=normalized_inputs,
         )
 
+    # ============================================================
+    # SOURCE CLEANER
+    # ============================================================
+
     @staticmethod
-    def _clean_source(text: str) -> str:
+    def _clean_source(
+        text: str,
+    ) -> str:
 
         source = text.strip()
 
